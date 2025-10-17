@@ -1,12 +1,16 @@
 from datetime import date
 from flask import Flask, abort, render_template, redirect, url_for, flash
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 from flask_bootstrap import Bootstrap5
 from flask_ckeditor import CKEditor
-# from flask_gravatar import Gravatar
+import hashlib
 from flask_login import UserMixin, login_user, LoginManager, current_user, logout_user
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.orm import relationship, DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import Integer, String, Text
+from sqlalchemy import Integer, String, Text, func
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 # Import your forms from the forms.py
@@ -26,7 +30,8 @@ This will install the packages from the requirements.txt for this project.
 '''
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = '8BYkEfBA6O6donzWlSihBXox7C0sKR6b'
+import os
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or '8BYkEfBA6O6donzWlSihBXox7C0sKR6b'
 ckeditor = CKEditor(app)
 Bootstrap5(app)
 
@@ -41,19 +46,20 @@ def load_user(user_id):
 
 
 # For adding profile images to the comment section
-# gravatar = Gravatar(app,
-#                     size=100,
-#                     rating='g',
-#                     default='retro',
-#                     force_default=False,
-#                     force_lower=False,
-#                     use_ssl=False,
-#                     base_url=None)
+def gravatar_url(email, size=100, default='retro', rating='g'):
+    """Generate Gravatar URL for email."""
+    email_hash = hashlib.md5(email.lower().encode('utf-8')).hexdigest()
+    return f"https://www.gravatar.com/avatar/{email_hash}?s={size}&d={default}&r={rating}"
+
+# Add gravatar filter to Jinja2
+@app.template_filter('gravatar')
+def gravatar_filter(email):
+    return gravatar_url(email)
 
 # CREATE DATABASE
 class Base(DeclarativeBase):
     pass
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///posts.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL') or 'sqlite:///posts.db'
 db = SQLAlchemy(model_class=Base)
 db.init_app(app)
 
@@ -105,14 +111,35 @@ class Comment(db.Model):
 
 with app.app_context():
     db.create_all()
+    
+    # Create admin user if it doesn't exist
+    admin_user = db.session.execute(db.select(User).where(User.id == 1)).scalar()
+    if not admin_user:
+        # Check if there's an admin email in environment variables
+        admin_email = os.environ.get('ADMIN_EMAIL', 'admin@blog.com')
+        admin_password = os.environ.get('ADMIN_PASSWORD', 'admin123')
+        admin_name = os.environ.get('ADMIN_NAME', 'Admin User')
+        
+        # Only create if no users exist yet
+        user_count = db.session.execute(db.select(func.count(User.id))).scalar()
+        if user_count == 0:
+            admin_user = User(
+                id=1,
+                email=admin_email,
+                name=admin_name,
+                password=generate_password_hash(admin_password, method='pbkdf2:sha256', salt_length=8)
+            )
+            db.session.add(admin_user)
+            db.session.commit()
+            print(f"Admin user created with email: {admin_email}")
 
 
 # Create an admin-only decorator
 def admin_only(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        # If id is not 1 then return abort with 403 error
-        if current_user.id != 1:
+        # Check if user is authenticated and is admin
+        if not current_user.is_authenticated or current_user.id != 1:
             return abort(403)
         # Otherwise continue with the route function
         return f(*args, **kwargs)
